@@ -42,11 +42,7 @@ class _MyHomePageState extends State<MyHomePage> {
         ),
       ),
       floatingActionButton: FloatingActionButton(
-        onPressed: () => rowContainer.currentState.setState(
-              () => rowContainer.currentState.children.add(RowItem(
-                  key: ValueKey('LineItemWidget<1>'),
-                  parent: rowContainer.currentState)),
-            ),
+        onPressed: () => rowContainer.currentState.addRow(),
         tooltip: 'Add',
         child: Icon(Icons.add),
       ),
@@ -84,32 +80,57 @@ class RowContainer extends StatefulWidget {
 
 class _RowContainerState extends State<RowContainer> {
   final List<_RowItemState> rows = [];
-  final List<Widget> children = [];
+  final List<RowItem> children = [];
+
+  void addRow() => setState(() => children.add(RowItem(
+      originalIndex: children.length,
+      parent: this,
+      uid: DateTime.now().microsecondsSinceEpoch)));
+
   @override
   Widget build(BuildContext context) {
     return ReorderableListView(
       children: children,
       onReorder: (oldIdx, newIdx) {
-        // Moved down
-        if (oldIdx < newIdx) {
-          // removing the item at oldIndex will shorten the list by 1.
-          newIdx -= 1;
-        }
+        // These two lines are workarounds for ReorderableListView problems
+        if (newIdx > children.length) newIdx = children.length;
+        if (oldIdx < newIdx) newIdx--;
 
         final row = rows.removeAt(oldIdx);
-        final child = children.removeAt(oldIdx);
-        row.index = newIdx;
-
         rows.insert(newIdx, row);
-        children.insert(newIdx, child);
+
+        /// Now that we have all states in proper order, updating their indices
+        for (var i = 0; i < rows.length; i++) {
+          rows[i].setState(() => rows[i].index = i);
+          // rows[i].index = i;
+        }
+
+        // See: https://github.com/flutter/flutter/issues/21829
+        Future.delayed(Duration(milliseconds: 20), () {
+          setState(() {
+            final child = children.removeAt(oldIdx);
+            children.insert(newIdx, child);
+          });
+        });
       },
     );
   }
 }
 
 class RowItem extends StatefulWidget {
-  RowItem({ValueKey key, this.parent}) : super(key: key);
+  RowItem({this.originalIndex, this.parent, this.uid})
+      : super(key: ValueKey('RowItem<$uid>'));
   final _RowContainerState parent;
+  final int originalIndex;
+
+  /// Every row has a unique id besides it's index because after drag'N'drop or
+  /// deleting a row or adding a row or combination of these three actions,
+  /// Another row may end up with the same index. But at any given
+  /// time all rows will have unique index and all of them will match what the user
+  /// sees in the UI. This uid is used for creating the `Key` of this widget
+  /// because we reuse the existing widgets. And we reuse the widgets because we
+  /// need to maintain their states and thier childrens Like FocusNode and TextEdittingController
+  final int uid;
   @override
   _RowItemState createState() => _RowItemState();
 }
@@ -121,13 +142,16 @@ class _RowItemState extends State<RowItem> {
   Cell totalWidget;
   Widget nameField;
 
-  /// Index of this row
+  /// Effective index of this row
   int index;
+
   @override
   void initState() {
     super.initState();
-    index = widget.parent.rows.length;
-    widget.parent.rows.add(this);
+
+    /// Initially when the row is inserted this will be it's valid index
+    index = widget.originalIndex;
+
     qtyWidget = Cell(
       controller: TextEditingController(),
       focusNode: FocusNode(),
@@ -157,21 +181,32 @@ class _RowItemState extends State<RowItem> {
       maxLines: 1,
       enableInteractiveSelection: true,
       textInputAction: TextInputAction.next,
-      controller: TextEditingController(text: 'line item...$index'),
+      controller: TextEditingController(),
+      decoration: InputDecoration(hintText: 'originalIndex:$index'),
     );
+    Future.delayed(Duration(milliseconds: 20),
+        () => widget.parent.setState(() => widget.parent.rows.add(this)));
   }
 
   @override
   Widget build(BuildContext context) {
-    print('built row $index');
     return Dismissible(
-      key: ValueKey('DismissibleRowItem<$index>'),
+      key: ValueKey('DismissibleRowItem(${widget.uid})<$index>'),
       background: Container(
         color: Colors.red,
         child: Icon(Icons.close),
       ),
       onDismissed: (direction) {
-        widget.parent.rows.remove(this);
+        widget.parent.setState(() {
+          widget.parent.rows.remove(this);
+
+          widget.parent.children.remove(widget);
+
+          /// Update all the rows below this one
+          for (int i = index; i < widget.parent.rows.length; i++) {
+            widget.parent.rows[i].index = i;
+          }
+        });
       },
       direction: DismissDirection.endToStart,
       child: Card(
@@ -184,8 +219,13 @@ class _RowItemState extends State<RowItem> {
                 children: [
                   Padding(
                     padding: const EdgeInsets.all(4.0),
-                    child: Icon(
-                      Icons.drag_handle,
+                    child: Column(
+                      children: <Widget>[
+                        Icon(
+                          Icons.drag_handle,
+                        ),
+                        Text('${index + 1}.')
+                      ],
                     ),
                   ),
                   Flexible(
@@ -215,7 +255,8 @@ class _RowItemState extends State<RowItem> {
 }
 
 class Cell extends StatefulWidget {
-  Cell({this.controller, this.focusNode, this.name, this.parent});
+  Cell({this.controller, this.focusNode, this.name, this.parent})
+      : super(key: ValueKey('Cell($name) of RowItem<${parent.widget.uid}>'));
   final TextEditingController controller;
   final FocusNode focusNode;
   final String name;
@@ -234,10 +275,10 @@ class _CellState extends State<Cell> {
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
         child: TextField(
           key: ValueKey(
-              '\$CellTextField(${widget.name})<${widget.parent.index}>'),
+              'CellTextField(${widget.name}) of RowItem<${widget.parent.widget.uid}>'),
           autofocus: false,
           autocorrect: false,
-          dragStartBehavior: DragStartBehavior.down,
+          dragStartBehavior: DragStartBehavior.start,
           focusNode: widget.focusNode,
           keyboardType: TextInputType.numberWithOptions(decimal: true),
           style: Theme.of(context).textTheme.subtitle,
